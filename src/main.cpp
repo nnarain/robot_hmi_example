@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <lvgl.h>
 #include <Arduino_GFX_Library.h>
+#include "bsp_cst816.h"
 
 #define EXAMPLE_PIN_NUM_LCD_SCLK 39
 #define EXAMPLE_PIN_NUM_LCD_MOSI 38
@@ -9,6 +10,8 @@
 #define EXAMPLE_PIN_NUM_LCD_RST -1
 #define EXAMPLE_PIN_NUM_LCD_CS 45
 #define EXAMPLE_PIN_NUM_LCD_BL 1
+#define EXAMPLE_PIN_NUM_TP_SDA 48
+#define EXAMPLE_PIN_NUM_TP_SCL 47
 
 #define EXAMPLE_LCD_ROTATION 1  // 90 degrees for landscape
 #define EXAMPLE_LCD_H_RES 240  // Physical width
@@ -40,14 +43,38 @@ lv_obj_t *screen_battery;
 lv_obj_t *screen_diagnostics;
 lv_obj_t *screen_tests;
 
+/* LVGL tick callback */
+static uint32_t my_tick_get_cb(void) {
+    return millis();
+}
+
 /* Display flush - Arduino_GFX style */
 void my_disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
   lv_disp_flush_ready(disp_drv);
 }
 
+/* Touch input read - matches working examples exactly */
+void my_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
+    uint16_t touchpad_x;
+    uint16_t touchpad_y;
+    bsp_touch_read();
+    if (bsp_touch_get_coordinates(&touchpad_x, &touchpad_y)) {
+        data->point.x = touchpad_x;
+        data->point.y = touchpad_y;
+        data->state = LV_INDEV_STATE_PRESSED;
+        Serial.printf("TOUCH! x=%d, y=%d\n", touchpad_x, touchpad_y);
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
 /* Navigation functions */
 void navigate_to(lv_obj_t *screen) {
-    lv_scr_load_anim(screen, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
+    Serial.printf("Navigating to screen: %p\n", screen);
+    lv_scr_load(screen);  // Instant load - no animation
+    lv_obj_invalidate(lv_scr_act());  // Force full screen redraw
+    lv_refr_now(NULL);    // Force immediate refresh
+    Serial.println("Screen loaded successfully");
 }
 
 void go_to_main_menu(lv_event_t *e) {
@@ -101,6 +128,7 @@ lv_obj_t* create_menu_button(lv_obj_t *parent, const char *text, lv_event_cb_t c
 void create_screens() {
     // ===== Main Menu Screen =====
     screen_main_menu = lv_obj_create(NULL);
+    lv_obj_clear_flag(screen_main_menu, LV_OBJ_FLAG_CLICKABLE); // Make container click-through
     
     lv_obj_t *title = lv_label_create(screen_main_menu);
     lv_label_set_text(title, "Robot HMI");
@@ -121,6 +149,7 @@ void create_screens() {
     
     // ===== Status Screen =====
     screen_status = lv_obj_create(NULL);
+    lv_obj_clear_flag(screen_status, LV_OBJ_FLAG_CLICKABLE);
     create_back_button(screen_status);
     
     lv_obj_t *status_title = lv_label_create(screen_status);
@@ -138,6 +167,7 @@ void create_screens() {
     
     // ===== Battery Screen =====
     screen_battery = lv_obj_create(NULL);
+    lv_obj_clear_flag(screen_battery, LV_OBJ_FLAG_CLICKABLE);
     create_back_button(screen_battery);
     
     lv_obj_t *battery_title = lv_label_create(screen_battery);
@@ -155,6 +185,7 @@ void create_screens() {
     
     // ===== Diagnostics Screen =====
     screen_diagnostics = lv_obj_create(NULL);
+    lv_obj_clear_flag(screen_diagnostics, LV_OBJ_FLAG_CLICKABLE);
     create_back_button(screen_diagnostics);
     
     lv_obj_t *diag_title = lv_label_create(screen_diagnostics);
@@ -172,6 +203,7 @@ void create_screens() {
     
     // ===== Tests Screen =====
     screen_tests = lv_obj_create(NULL);
+    lv_obj_clear_flag(screen_tests, LV_OBJ_FLAG_CLICKABLE);
     create_back_button(screen_tests);
     
     lv_obj_t *tests_title = lv_label_create(screen_tests);
@@ -206,7 +238,11 @@ void setup()
     // Init backlight
     pinMode(EXAMPLE_PIN_NUM_LCD_BL, OUTPUT);
     digitalWrite(EXAMPLE_PIN_NUM_LCD_BL, HIGH);
-    Serial.println("Backlight ON");
+    Serial.println("Backlight enabled");
+    
+    // Init touch device - matches working examples
+    Wire.begin(EXAMPLE_PIN_NUM_TP_SDA, EXAMPLE_PIN_NUM_TP_SCL);
+    bsp_touch_init(&Wire, gfx->getRotation(), gfx->width(), gfx->height());
 
     // Init LVGL
     lv_init();
@@ -235,8 +271,7 @@ void setup()
         disp_drv.ver_res = screenHeight;
         disp_drv.flush_cb = my_disp_flush;
         disp_drv.draw_buf = &draw_buf;
-        disp_drv.direct_mode = true;  // Arduino_GFX uses direct mode
-        disp_drv.full_refresh = 1;    // Always refresh full screen to avoid artifacts
+        disp_drv.direct_mode = true;
         lv_disp_drv_register(&disp_drv);
         
         Serial.print("Screen dimensions: ");
@@ -246,13 +281,33 @@ void setup()
 
         Serial.println("Display driver registered");
 
+        // Initialize the input device driver
+        static lv_indev_drv_t indev_drv;
+        lv_indev_drv_init(&indev_drv);
+        indev_drv.type = LV_INDEV_TYPE_POINTER;
+        indev_drv.read_cb = my_touchpad_read;
+        lv_indev_t *my_indev = lv_indev_drv_register(&indev_drv);
+        
+        if (my_indev != NULL) {
+            Serial.printf("Touch input registered at %p\n", my_indev);
+        } else {
+            Serial.println("ERROR: Touch input registration failed!");
+        }
+
         // Create all application screens
         create_screens();
         
         // Load the main menu as the starting screen
         lv_scr_load(screen_main_menu);
         
-        Serial.println("Robot HMI screens created");
+        // Force LVGL to calculate layout for all objects
+        lv_obj_update_layout(screen_main_menu);
+        lv_obj_update_layout(screen_status);
+        lv_obj_update_layout(screen_battery);
+        lv_obj_update_layout(screen_diagnostics);
+        lv_obj_update_layout(screen_tests);
+        
+        Serial.println("Robot HMI screens created and laid out");
     }
 
     Serial.println("Setup done");
@@ -260,7 +315,63 @@ void setup()
 
 void loop()
 {
-    lv_timer_handler(); /* let the GUI do its work */
+    static unsigned long last_debug = 0;
+    static int loop_count = 0;
+    
+    // Manually read touch and inject into LVGL (bypassing broken callback)
+    static bool was_pressed = false;
+    static unsigned long last_click_time = 0;
+    uint16_t x, y;
+    bsp_touch_read();
+    bool is_pressed = bsp_touch_get_coordinates(&x, &y);
+    
+    // Debounce and ignore touches right after screen navigation
+    if (is_pressed && !was_pressed && (millis() - last_click_time > 300)) {
+        // Touch just pressed (with 300ms debounce)
+        Serial.printf("TOUCH PRESS: x=%d, y=%d\n", x, y);
+        
+        // Debug: list all children on screen
+        lv_obj_t *screen = lv_scr_act();
+        Serial.printf("  Active screen: %p, child count: %d\n", screen, lv_obj_get_child_cnt(screen));
+        
+        lv_point_t point = {(lv_coord_t)x, (lv_coord_t)y};
+        lv_obj_t *obj = lv_indev_search_obj(screen, &point);
+        Serial.printf("  Search result: %p\n", obj);
+        
+        // Try direct child iteration
+        uint32_t child_cnt = lv_obj_get_child_cnt(screen);
+        for (uint32_t i = 0; i < child_cnt; i++) {
+            lv_obj_t *child = lv_obj_get_child(screen, i);
+            lv_area_t coords;
+            lv_obj_get_coords(child, &coords);
+            Serial.printf("    Child %d: %p, pos(%d,%d)-(%d,%d), clickable=%d\n", 
+                         i, child, coords.x1, coords.y1, coords.x2, coords.y2,
+                         lv_obj_has_flag(child, LV_OBJ_FLAG_CLICKABLE));
+            
+            // Check if touch is within this child
+            if (x >= coords.x1 && x <= coords.x2 && y >= coords.y1 && y <= coords.y2) {
+                Serial.printf("      Touch is inside this child!\n");
+                if (lv_obj_has_flag(child, LV_OBJ_FLAG_CLICKABLE)) {
+                    Serial.printf("      Sending click to this child\n");
+                    lv_event_send(child, LV_EVENT_CLICKED, NULL);
+                    last_click_time = millis();
+                    delay(50);
+                    break;
+                }
+            }
+        }
+    }
+    was_pressed = is_pressed;
+    
+    lv_task_handler(); /* LVGL 8.3 - handles timers and tasks */
+    
+    // Debug: Print loop status every 5 seconds
+    loop_count++;
+    if (millis() - last_debug > 5000) {
+        Serial.printf("Loop running: %d iterations in 5s\n", loop_count);
+        loop_count = 0;
+        last_debug = millis();
+    }
     
     // Push LVGL buffer to display
 #if (LV_COLOR_16_SWAP != 0)
